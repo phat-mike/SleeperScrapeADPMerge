@@ -469,8 +469,210 @@ class SleeperAPIExporter:
         except (ValueError, IndexError):
             return None
 
+    def normalize_player_name(self, name):
+        """Normalize player names for better matching"""
+        if not name:
+            return ""
+        
+        # Convert to lowercase and remove extra spaces
+        normalized = str(name).lower().strip()
+        
+        # Remove common suffixes
+        suffixes = [' jr.', ' jr', ' sr.', ' sr', ' iii', ' ii', ' iv']
+        for suffix in suffixes:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)].strip()
+        
+        # Remove periods and hyphens
+        normalized = normalized.replace('.', '').replace('-', ' ')
+        
+        # Handle common name variations
+        name_replacements = {
+            'kenneth': 'ken',
+            'michael': 'mike',
+            'robert': 'bob',
+            'william': 'will',
+            'christopher': 'chris',
+            'matthew': 'matt',
+            'anthony': 'tony',
+            'joshua': 'josh'
+        }
+        
+        for full_name, short_name in name_replacements.items():
+            normalized = normalized.replace(full_name, short_name)
+        
+        return normalized
+
+    def load_ranking_csvs(self, ffpc_csv, underdog_csv):
+        """Load FFPC and Underdog CSV files and return DataFrames"""
+        ranking_data = {}
+
+        print(f"Loading FFPC rankings from {ffpc_csv}...")
+        try:
+            ffpc_df = pd.read_csv(ffpc_csv)
+            # Standardize column names
+            ffpc_df = ffpc_df.rename(columns={
+                'Name': 'name',
+                'Position': 'position', 
+                'Team': 'team',
+                'ADP': 'ffpc_adp',
+                'ETR_Rank': 'ffpc_etr_rank',
+                'Delta': 'ffpc_delta',
+                'Pos_Rank': 'ffpc_pos_rank'
+            })
+            ranking_data['ffpc'] = ffpc_df
+        except Exception as e:
+            print(f"❌ Error loading FFPC CSV: {e}")
+            sys.exit(1)
+
+        print(f"Loading Underdog rankings from {underdog_csv}...")
+        try:
+            underdog_df = pd.read_csv(underdog_csv)
+            # Standardize column names
+            underdog_df = underdog_df.rename(columns={
+                'Name': 'name',
+                'Position': 'position',
+                'Team': 'team',
+                'ADP': 'ud_adp',
+                'ETR_Rank': 'ud_etr_rank',
+                'Delta': 'ud_delta',
+                'Pos_Rank': 'ud_pos_rank'
+            })
+            ranking_data['underdog'] = underdog_df
+        except Exception as e:
+            print(f"❌ Error loading Underdog CSV: {e}")
+            sys.exit(1)
+
+        return ranking_data
+
+    def merge_ranking_data(self, players_df, ranking_data):
+        """Merge ranking data with players DataFrame"""
+        if players_df.empty or not ranking_data:
+            print("⚠️ No players data or ranking data to merge")
+            return players_df, {}
+        
+        print("🔗 Merging ranking data with players...")
+        
+        # Add normalized name to players df for matching
+        players_df['normalized_name'] = players_df['full_name'].apply(self.normalize_player_name)
+        
+        # Track matches and misses
+        match_stats = {
+            'ffpc_matched': 0,
+            'ffpc_unmatched': [],
+            'underdog_matched': 0, 
+            'underdog_unmatched': [],
+            'players_with_rankings': 0
+        }
+        
+        # Initialize ranking columns
+        ranking_columns = [
+            'ffpc_adp', 'ffpc_etr_rank', 'ffpc_delta', 'ffpc_pos_rank',
+            'ud_adp', 'ud_etr_rank', 'ud_delta', 'ud_pos_rank', 'ud_id'
+        ]
+        
+        for col in ranking_columns:
+            players_df[col] = None
+        
+        # Merge FFPC data
+        if 'ffpc' in ranking_data:
+            ffpc_df = ranking_data['ffpc']
+            
+            for idx, ffpc_row in ffpc_df.iterrows():
+                # Try to find matching player
+                matches = players_df[
+                    (players_df['full_name'] == ffpc_row['name'])
+                ]
+                
+                if len(matches) > 0:
+                    # Found match - update player with FFPC data
+                    player_idx = matches.index[0]
+                    players_df.loc[player_idx, 'ffpc_adp'] = ffpc_row['ffpc_adp']
+                    players_df.loc[player_idx, 'ffpc_etr_rank'] = ffpc_row['ffpc_etr_rank'] 
+                    players_df.loc[player_idx, 'ffpc_delta'] = ffpc_row['ffpc_delta']
+                    players_df.loc[player_idx, 'ffpc_pos_rank'] = ffpc_row['ffpc_pos_rank']
+                    
+                    match_stats['ffpc_matched'] += 1
+                else:
+                    # No match found
+                    match_stats['ffpc_unmatched'].append({
+                        'name': ffpc_row['name'],
+                        'team': ffpc_row['team'],
+                        'position': ffpc_row['position']
+                    })
+        
+        # Merge Underdog data
+        if 'underdog' in ranking_data:
+            underdog_df = ranking_data['underdog']
+            
+            for idx, underdog_row in underdog_df.iterrows():
+                # Try to find matching player
+                matches = players_df[
+                    (players_df['full_name'] == underdog_row['name'])
+                ]
+                
+                if len(matches) > 0:
+                    # Found match - update player with Underdog data
+                    player_idx = matches.index[0]
+                    players_df.loc[player_idx, 'ud_adp'] = underdog_row['ud_adp']
+                    players_df.loc[player_idx, 'ud_etr_rank'] = underdog_row['ud_etr_rank']
+                    players_df.loc[player_idx, 'ud_delta'] = underdog_row['ud_delta']
+                    players_df.loc[player_idx, 'ud_pos_rank'] = underdog_row['ud_pos_rank']
+                    players_df.loc[player_idx, 'ud_id'] = underdog_row['ud_id']
+                    
+                    match_stats['underdog_matched'] += 1
+                else:
+                    # No match found
+                    match_stats['underdog_unmatched'].append({
+                        'name': underdog_row['name'],
+                        'team': underdog_row['team'],
+                        'position': underdog_row['position'],
+                    })
+        
+        # Count players with any ranking data
+        has_rankings = (
+            players_df['ffpc_adp'].notna() | 
+            players_df['ud_adp'].notna()
+        )
+        match_stats['players_with_rankings'] = has_rankings.sum()
+        
+        # Remove the temporary normalized_name column
+        players_df = players_df.drop('normalized_name', axis=1)
+        
+        # Print merge statistics
+        print(f"\n🔗 Ranking merge results:")
+        if 'ffpc' in ranking_data:
+            ffpc_total = len(ranking_data['ffpc'])
+            print(f"  📊 FFPC: {match_stats['ffpc_matched']}/{ffpc_total} matched ({(match_stats['ffpc_matched']/ffpc_total*100):.1f}%)")
+        
+        if 'underdog' in ranking_data:
+            underdog_total = len(ranking_data['underdog'])
+            print(f"  📊 Underdog: {match_stats['underdog_matched']}/{underdog_total} matched ({(match_stats['underdog_matched']/underdog_total*100):.1f}%)")
+        
+        print(f"  👥 Players with rankings: {match_stats['players_with_rankings']}/{len(players_df)}")
+        
+        return players_df, match_stats
+
+    def export_unmatched_rankings(self, match_stats, filename_base):
+        """Export unmatched ranking players to CSV for review"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Export FFPC unmatched
+        if match_stats['ffpc_unmatched']:
+            ffpc_unmatched_file = f"{filename_base}_ffpc_unmatched_{timestamp}.csv"
+            ffpc_unmatched_df = pd.DataFrame(match_stats['ffpc_unmatched'])
+            ffpc_unmatched_df.to_csv(ffpc_unmatched_file, index=False)
+            print(f"📄 Exported {len(match_stats['ffpc_unmatched'])} unmatched FFPC players to: {ffpc_unmatched_file}")
+        
+        # Export Underdog unmatched  
+        if match_stats['underdog_unmatched']:
+            underdog_unmatched_file = f"{filename_base}_underdog_unmatched_{timestamp}.csv"
+            underdog_unmatched_df = pd.DataFrame(match_stats['underdog_unmatched'])
+            underdog_unmatched_df.to_csv(underdog_unmatched_file, index=False)
+            print(f"📄 Exported {len(match_stats['underdog_unmatched'])} unmatched Underdog players to: {underdog_unmatched_file}")
+
     def export_to_excel(self, filename=None, league_id=None, include_players=False, 
-                   weeks=None, use_cache=True):
+                   weeks=None, use_cache=True, ffpc_csv=None, underdog_csv=None):
         """Export data to Excel"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -501,6 +703,14 @@ class SleeperAPIExporter:
                 league_data = all_data.get('league_info')
                 players_df = self.process_players_data(all_data['players'], league_data)
                 
+                if not players_df.empty and (ffpc_csv and underdog_csv):
+                    ranking_data = self.load_ranking_csvs(ffpc_csv, underdog_csv)
+                    players_df, match_stats = self.merge_ranking_data(players_df, ranking_data)
+
+                    # Export unmatched rankings for review
+                    base_name = filename.replace('.xlsx', '')
+                    self.export_unmatched_rankings(match_stats, base_name)
+
                 if not players_df.empty:
                     players_df.to_excel(writer, sheet_name='Players', index=False)
                     print(f"✓ Exported {len(players_df)} fantasy-relevant players")
@@ -580,7 +790,6 @@ class SleeperAPIExporter:
 
         print(f"🎉 Export completed: {filename} ({sheets_created} sheets created)")
         return filename
-
 
     def clear_cache(self):
         """Clear the cache file"""
@@ -668,7 +877,9 @@ def main():
                     f"{valid_league_id}.xlsx", 
                     league_id=valid_league_id,
                     include_players=True,
-                    use_cache=USE_CACHE
+                    use_cache=USE_CACHE,
+                    ffpc_csv=os.path.join(os.path.dirname(__file__), "etr_rankings", "2025 FFPC Best Ball SuperFlex Rankings.csv"),
+                    underdog_csv=os.path.join(os.path.dirname(__file__), "etr_rankings", "2025 Underdog SuperFlex Rankings.csv")
                 )
             except Exception as e:
                 print(f"❌ Export failed: {e}")
